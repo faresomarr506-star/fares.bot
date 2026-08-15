@@ -85,10 +85,9 @@ function buildBot() {
     }
     const lines = u.phones.map((p, i) => {
       const on = p.enabled ? '✅' : '⏸';
-      const emoji = (p.emojis || []).join(' ');
-      return `*${i + 1}* \\| ${on} \\`${p.number}\\`\n   إيموجي: ${emoji || '—'}\n   آخر اتصال: ${
-        p.lastSeen ? new Date(p.lastSeen).toLocaleString('en-GB') : '—'
-      }`;
+      const emojiJoined = (p.emojis || []).join(' ');
+      const lastSeen = p.lastSeen ? new Date(p.lastSeen).toLocaleString('en-GB') : '—';
+      return '*' + (i + 1) + '* \\| ' + on + ' \\`' + p.number + '\\`\n   إيموجي: ' + (emojiJoined || '—') + '\n   آخر اتصال: ' + lastSeen;
     });
     await ctx.editMessageText(
       ['📋 *أرقامك المربوطة:*', '', ...lines].join('\n'),

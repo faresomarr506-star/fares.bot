@@ -78,8 +78,15 @@ function getReconnectDelay(statusCode) {
   return 5000
 }
 
+function normalizePairCodeValue(code) {
+  return String(code || '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+}
+
 function formatPairCode(code) {
-  return (String(code || '').match(/.{1,4}/g) || [String(code || '')]).join('-')
+  const cleaned = normalizePairCodeValue(code)
+  return (cleaned.match(/.{1,4}/g) || [cleaned]).join('-')
 }
 
 function pickReactionEmoji(userId, number) {
@@ -101,6 +108,7 @@ class WaSession {
     this.pairingAttempts = 0
     this.pendingPairingPromise = null
     this.connectionState = 'idle'
+    this.pairingSignalReceivedAt = 0
     this.isNewPairing = false
     this.handledStatusIds = new Map()
     this.lastActivityAt = Date.now()
@@ -194,7 +202,11 @@ class WaSession {
         await sleep(250)
         continue
       }
-      if (this.connectionState === 'connecting' || this.connectionState === 'open') {
+      if (
+        this.pairingSignalReceivedAt ||
+        this.connectionState === 'connecting' ||
+        this.connectionState === 'open'
+      ) {
         await sleep(1200)
         return true
       }
@@ -204,16 +216,22 @@ class WaSession {
   }
 
   async onConnectionUpdate(update) {
-    const { connection, lastDisconnect } = update || {}
+    const { connection, lastDisconnect, qr } = update || {}
     const statusCode = lastDisconnect?.error?.output?.statusCode
     const registered = !!this.state?.creds?.registered
     if (connection) this.connectionState = connection
+
+    if (!registered && qr) {
+      this.pairingSignalReceivedAt = Date.now()
+      db.setStatus(this.userId, this.number, 'pairing')
+    }
 
     if (connection === 'connecting' && !registered) {
       db.setStatus(this.userId, this.number, 'pairing')
     }
 
     if (connection === 'open') {
+      this.pairingSignalReceivedAt = 0
       this.pairingAttempts = 0
       this.pairingRequested = false
       this.pendingPairingPromise = null
@@ -260,6 +278,7 @@ class WaSession {
       this.sock = null
       this.state = null
       this.connectionState = 'close'
+      this.pairingSignalReceivedAt = 0
       this.pendingPairingPromise = null
 
       if (statusCode === DisconnectReason.loggedOut) {
@@ -307,7 +326,11 @@ class WaSession {
         try {
           this.pairingRequested = true
           await this.waitForPairingReady()
-          const rawCode = await this.sock.requestPairingCode(String(this.number).replace(/\D/g, ''))
+          const requestedCode = await this.sock.requestPairingCode(String(this.number).replace(/\D/g, ''))
+          const rawCode = normalizePairCodeValue(requestedCode)
+          if (rawCode.length !== 8) {
+            throw new Error('empty_or_invalid_pairing_code')
+          }
           const code = formatPairCode(rawCode)
           this.isNewPairing = true
           this.pairingAttempts = 0

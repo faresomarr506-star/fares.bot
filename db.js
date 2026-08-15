@@ -621,7 +621,13 @@ function getPairingCode(number) {
   const found = getNumberWithOwner(number)
   if (!found) return null
   const pairing = found.record.pairing || null
-  if (!pairing?.expiresAt) return pairing
+  if (!pairing) return null
+
+  const rawCode = String(pairing.rawCode || '').trim()
+  const code = String(pairing.code || '').trim()
+  if (!rawCode && !code) return null
+
+  if (!pairing.expiresAt) return clone(pairing)
   if (new Date(pairing.expiresAt).getTime() <= Date.now()) return null
   return clone(pairing)
 }

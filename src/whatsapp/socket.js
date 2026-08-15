@@ -9,7 +9,7 @@ const {
 } = require('@whiskeysockets/baileys');
 const logger = require('../utils/logger');
 const { phoneToJid } = require('../utils/phone');
-const { useMongoDBAuthState } = require('../models/Session');
+const { useMongoDBAuthState, hasActiveSession } = require('../models/Session');
 const { User } = require('../models/User');
 
 /**
@@ -55,7 +55,8 @@ function buildStatusHandler(meta) {
 
 async function createSocket({ number, telegramId }) {
   const jid = phoneToJid(number);
-  const { state, saveCreds, clear } = await useMongoDBAuthState(number);
+  const auth = await useMongoDBAuthState(number);
+  const { state, saveCreds, clear } = auth;
 
   const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: undefined }));
 
@@ -66,17 +67,7 @@ async function createSocket({ number, telegramId }) {
     markOnlineOnConnect: false,
     auth: {
       creds: state.creds,
-      keys: makeCacheableSignalKeyStore(
-        {
-          get: async (keyId) => state.appStateKeys?.[keyId] || null,
-          set: async (keyId, value) => {
-            state.appStateKeys = state.appStateKeys || {};
-            state.appStateKeys[keyId] = value;
-            await saveCreds();
-          },
-        },
-        logger
-      ),
+      keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
     generateHighQualityLinkPreview: false,
     logger,
@@ -89,12 +80,10 @@ async function createSocket({ number, telegramId }) {
     sock,
     telegramId,
     jid,
-    emojis: ['❤️', '🔥'], // default until DB read completes
-    onStatus: null,        // assigned below
+    emojis: ['❤️', '🔥'],
+    onStatus: null,
   };
 
-  // Single status listener attached at creation time. Replaced atomically on emoji
-  // changes by re-binding through meta.onStatus (see bindPhoneEmojis below).
   meta.onStatus = buildStatusHandler(meta);
   sock.ev.on('messages.upsert', meta.onStatus);
   sessions.set(number, meta);
@@ -102,40 +91,51 @@ async function createSocket({ number, telegramId }) {
   let backoff = 1500;
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect } = update;
+
     if (connection === 'open') {
       logger.info({ number }, 'WA socket opened');
       backoff = 1500;
       await User.updateOne(
         { telegramId, 'phones.number': number },
-        { $set: { 'phones.$.lastSeen': new Date() } }
-      );
-    } else if (connection === 'close') {
-      const code = lastDisconnect?.error?.output?.statusCode;
-      const loggedOut = code === DisconnectReason.loggedOut;
-      logger.warn({ number, code, loggedOut }, 'WA socket closed');
-      if (loggedOut) {
-        if (sessions.get(number)?.sock === sock) sessions.delete(number);
-        await clear().catch(() => {});
-        logger.info({ number }, 'session cleared (logged out)');
-        return;
-      }
-      // exponential reconnect (only if user still owns this socket)
-      setTimeout(() => {
-        const cur = sessions.get(number);
-        if (!cur || cur.sock !== sock) return; // someone replaced us
-        if (cur.sock === sock) {
-          sessions.delete(number);
-          spawnSocket({ number, telegramId }).catch((e) =>
-            logger.error({ e: e?.message, number }, 'reconnect failed')
-          );
+        {
+          $set: {
+            'phones.$.enabled': true,
+            'phones.$.lastSeen': new Date(),
+          },
         }
-      }, backoff);
-      backoff = Math.min(backoff * 2, 30000);
+      );
+      return;
     }
+
+    if (connection !== 'close') return;
+
+    const code = lastDisconnect?.error?.output?.statusCode;
+    const loggedOut = code === DisconnectReason.loggedOut;
+    logger.warn({ number, code, loggedOut }, 'WA socket closed');
+
+    if (loggedOut) {
+      if (sessions.get(number)?.sock === sock) sessions.delete(number);
+      await clear().catch(() => {});
+      await User.updateOne(
+        { telegramId, 'phones.number': number },
+        { $set: { 'phones.$.enabled': false } }
+      ).catch(() => {});
+      logger.info({ number }, 'session cleared (logged out)');
+      return;
+    }
+
+    setTimeout(() => {
+      const cur = sessions.get(number);
+      if (!cur || cur.sock !== sock) return;
+      sessions.delete(number);
+      spawnSocket({ number, telegramId }).catch((e) =>
+        logger.error({ e: e?.message, number }, 'reconnect failed')
+      );
+    }, backoff);
+
+    backoff = Math.min(backoff * 2, 30000);
   });
 
-  // Refresh emojis from DB lazily — covers the case where user just added the
-  // phone without an explicit email change.
   try {
     const u = await User.findOne({ telegramId });
     const p = (u?.phones || []).find((x) => x.number === number);
@@ -148,7 +148,6 @@ async function createSocket({ number, telegramId }) {
 async function spawnSocket({ number, telegramId }) {
   const existing = sessions.get(number);
   if (existing && existing.sock) return existing.sock;
-  // ensure any partial session wiped before starting fresh
   return createSocket({ number, telegramId });
 }
 
@@ -158,7 +157,6 @@ async function requestPairing(number) {
   if (meta.sock?.authState?.creds?.registered) {
     throw new Error('الرقم مربوط مسبقاً');
   }
-  // WhatsApp enforces ~3s wait between socket open and pairing code request.
   await new Promise((r) => setTimeout(r, 3000));
   const code = await meta.sock.requestPairingCode(number);
   return code;
@@ -184,10 +182,26 @@ async function logoutPhone(number) {
 async function restoreAllFromDB() {
   const users = await User.find({});
   let count = 0;
+
   for (const u of users) {
     for (const p of u.phones) {
       if (!p.enabled) continue;
+
       try {
+        // eslint-disable-next-line no-await-in-loop
+        const active = await hasActiveSession(p.number);
+        if (!active) {
+          // Phone exists in the user profile, but no valid Baileys auth session
+          // was stored yet. Disable restore for it to avoid boot-time crashes.
+          // eslint-disable-next-line no-await-in-loop
+          await User.updateOne(
+            { telegramId: u.telegramId, 'phones.number': p.number },
+            { $set: { 'phones.$.enabled': false } }
+          );
+          logger.warn({ number: p.number }, 'skipping restore: no valid stored session');
+          continue;
+        }
+
         // eslint-disable-next-line no-await-in-loop
         await spawnSocket({ number: p.number, telegramId: u.telegramId });
         // eslint-disable-next-line no-await-in-loop
@@ -198,6 +212,7 @@ async function restoreAllFromDB() {
       }
     }
   }
+
   return count;
 }
 

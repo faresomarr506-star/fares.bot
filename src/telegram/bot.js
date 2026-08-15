@@ -43,7 +43,6 @@ function buildBot() {
     );
   });
 
-  // -- callback menu buttons ----------------------------------------------
   bot.action('menu:home', async (ctx) => {
     try { await ctx.answerCbQuery(); } catch (_) {}
     state.reset(ctx.chat?.id || ctx.from?.id);
@@ -162,7 +161,6 @@ function buildBot() {
       return ctx.editMessageText('❌ خيار غير صالح.', mainMenu());
     }
     const number = u.phones[idx].number;
-    // logout best-effort
     try { const { logoutPhone } = require('../whatsapp/socket'); await logoutPhone(number); }
     catch (_) {}
     await removePhone(tgId, number);
@@ -192,7 +190,6 @@ function buildBot() {
     );
   });
 
-  // -- Text handler -------------------------------------------------------
   bot.on('text', async (ctx) => {
     const tgId = ctx.chat?.id || ctx.from?.id;
     const cur = state.get(tgId);
@@ -212,13 +209,13 @@ function buildBot() {
           backToMenu()
         );
       }
+
       const number = normalizePhoneNumber(text);
       const jid = phoneToJid(number);
+
       try {
         await addPhone(tgId, number, jid);
         await spawnSocket({ number, telegramId: tgId });
-        // tiny wait (Baileys needs the socket to be open before pairing)
-        await new Promise((r) => setTimeout(r, 3000));
         const code = await requestPairing(number);
         await bindPhoneEmojis(number, (await getEmojisFor(tgId, number)) || ['❤️', '🔥']);
         const safeCode = code?.match?.(/^PAIR-[A-Z0-9]+$/) ? code.slice(5) : code;
@@ -279,7 +276,7 @@ function buildBot() {
         [
           `✅ تم تحديث إيموجي الرقم \`${escapeMd(number)}\``,
           '',
-          'الإيموجي الحالية: ' + emojis.map(e => `\`${e}\``).join(' '),
+          'الإيموجي الحالية: ' + emojis.map((e) => `\`${e}\``).join(' '),
           '',
           'كل إيموجي يُختار عشوائياً لكل حالة \\(Status\\)\\.',
         ].join('\n'),

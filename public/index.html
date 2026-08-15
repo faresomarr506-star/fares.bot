@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Fares Bot | لوحة موقع متكاملة</title>
+    <meta name="description" content="منصة عربية حديثة لإدارة Fares Bot: صفحة هبوط، لوحة تحكم، تنزيل وسائط، إعدادات حماية، وردود ذكية." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/app-v2.css" />
+  </head>
+  <body>
+    <div class="page-bg"><div class="orb a"></div><div class="orb b"></div><div class="orb c"></div><div class="grid"></div></div>
+    <header class="topbar shell">
+      <div class="brand"><div class="brand-badge">F</div><div><strong id="siteTitle">Fares Bot</strong><small>منصة إدارة متكاملة للبوت والتحميل ولوحة التحكم</small></div></div>
+      <nav class="nav">
+        <a class="btn btn-ghost" href="#features">المميزات</a>
+        <a class="btn btn-ghost" href="#stats">الإحصائيات</a>
+        <a class="btn btn-ghost" href="#comments">التعليقات</a>
+        <a class="btn btn-secondary" href="/downloader">تنزيل الوسائط</a>
+        <a class="btn btn-primary" href="/panel">لوحة التحكم</a>
+      </nav>
+    </header>
+
+    <main class="shell">
+      <section class="hero">
+        <div class="hero-copy card">
+          <span class="eyebrow">Dark Dashboard · Express · Node.js</span>
+          <h1>تصميم عصري كامل لموقع البوت مع <span style="color:#93c5fd">لوحة تحكم</span> و<span style="color:#99f6e4">أداة تنزيل</span> و<span style="color:#c4b5fd">ذكاء ردود</span></h1>
+          <p class="lead" id="siteDescription">واجهة عربية متجاوبة تعمل على الهاتف والكمبيوتر، تعرض مميزات البوت، الإحصائيات العامة، الدخول إلى لوحة التحكم، وتنزيل فيديوهات TikTok وInstagram من داخل الموقع مباشرة.</p>
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="/panel">فتح لوحة التحكم</a>
+            <a class="btn btn-secondary" href="/downloader">أداة تحميل الوسائط</a>
+            <a class="btn btn-ghost" href="#pairing">كود الاقتران</a>
+          </div>
+          <div class="hero-metrics">
+            <div class="metric"><span>الأرقام المربوطة</span><strong id="statNumbers">0</strong></div>
+            <div class="metric"><span>الجلسات المتصلة</span><strong id="statConnected">0</strong></div>
+            <div class="metric"><span>تفاعلات الحالات</span><strong id="statReactions">0</strong></div>
+            <div class="metric"><span>التعليقات</span><strong id="statComments">0</strong></div>
+          </div>
+        </div>
+
+        <aside class="hero-side card" id="pairing">
+          <h2 class="side-panel-title">تجهيز كود اقتران مباشر</h2>
+          <p class="muted">أدخل الرقم الدولي ثم اطلب الكود. بعد الإنشاء سيتم عرض الكود ونسخه تلقائياً، مع رابط مباشر لصفحة هذا الرقم في لوحة التحكم.</p>
+          <form id="pairForm">
+            <div class="field"><span>رقم واتساب</span><input id="pairNumber" type="text" inputmode="numeric" placeholder="مثال: 9677XXXXXXX" required /></div>
+            <div class="field"><label><input id="pairAccepted" type="checkbox" /> أؤكد أن الرقم مخصص للربط فقط</label></div>
+            <div class="form-actions"><button class="btn btn-primary" type="submit">طلب كود الاقتران</button></div>
+            <div id="pairStatus" class="status"></div>
+          </form>
+          <div id="pairResult" class="hidden">
+            <div class="kv"><span>الكود</span><strong id="pairCode">—</strong></div>
+            <div class="panel-actions"><button class="btn btn-ghost" id="copyPairBtn" type="button">نسخ الكود</button><a id="pairPanelLink" class="btn btn-secondary" href="/panel">فتح صفحة الرقم</a></div>
+          </div>
+        </aside>
+      </section>
+
+      <div class="sections">
+        <section class="section card" id="features">
+          <div class="section-head"><div><h2>الأقسام الأساسية التي تم تجهيزها</h2><p>صفحة هبوط احترافية، لوحة تحكم داخلية، تنزيل وسائط سريع، وإدارة الردود الذكية والحماية.</p></div></div>
+          <div class="feature-grid">
+            <article class="feature"><div class="eyebrow">Landing</div><h3>صفحة رئيسية احترافية</h3><p>عرض المميزات، الإحصائيات، أزرار ربط البوت والدخول إلى لوحة التحكم، مع تصميم افتراضي داكن متجاوب.</p></article>
+            <article class="feature"><div class="eyebrow">Dashboard</div><h3>لوحة تحكم للرقم</h3><p>تسجيل دخول للرقم المربوط، إدارة الحماية، التفاعل مع الحالات، الردود الذكية، المحفظة، وسجل التفاعلات.</p></article>
+            <article class="feature"><div class="eyebrow">Downloader</div><h3>تحميل TikTok وInstagram</h3><p>نافذة إدخال مخصصة لمعالجة الروابط وإخراج زر تحميل مباشر من الموقع دون الاعتماد على تيليجرام فقط.</p></article>
+            <article class="feature"><div class="eyebrow">AI Replies</div><h3>نطاق الرد الذكي والكلمات المفتاحية</h3><p>إعداد inbox أو groups، وكتابة ردود مخصصة حسب الكلمات المفتاحية، مع حقول جاهزة للحفظ من اللوحة.</p></article>
+          </div>
+        </section>
+
+        <section class="section card" id="stats">
+          <div class="section-head"><div><h2>إحصائيات البوت</h2><p>تعرض بيانات التشغيل والجلسات وربط الأرقام بشكل لحظي من مشروع Node.js نفسه.</p></div><div class="small" id="statsUpdated">آخر تحديث: —</div></div>
+          <div class="stats-grid">
+            <div class="stat"><span>المستخدمون</span><strong id="totalUsers">0</strong></div>
+            <div class="stat"><span>الأرقام المربوطة</span><strong id="totalNumbers">0</strong></div>
+            <div class="stat"><span>المتصلة</span><strong id="connectedNumbers">0</strong></div>
+            <div class="stat"><span>قيد الاقتران</span><strong id="pairingNumbers">0</strong></div>
+            <div class="stat"><span>إعادة الاتصال</span><strong id="totalReconnects">0</strong></div>
+            <div class="stat"><span>مشاهدة الحالات</span><strong id="totalStatusViews">0</strong></div>
+            <div class="stat"><span>تفاعلات الحالات</span><strong id="totalStatusReactions">0</strong></div>
+            <div class="stat"><span>الجلسات النشطة</span><strong id="activeSessions">0</strong></div>
+          </div>
+        </section>
+
+        <section class="two-col">
+          <section class="section card">
+            <div class="section-head"><div><h2>دخول سريع إلى لوحة الرقم</h2><p>سجل دخولك بالرقم وكلمة المرور ثم انتقل مباشرة إلى لوحة التحكم الكاملة.</p></div></div>
+            <form id="loginForm">
+              <div class="field"><span>الرقم المربوط</span><input id="loginNumber" type="text" inputmode="numeric" placeholder="مثال: 9677XXXXXXX" required /></div>
+              <div class="field"><span>كلمة المرور</span><input id="loginPassword" type="password" placeholder="كلمة المرور" required /></div>
+              <div class="form-actions"><button class="btn btn-primary" type="submit">تسجيل الدخول</button><a class="btn btn-ghost" href="/panel">فتح البوابة</a></div>
+              <div id="loginStatus" class="status"></div>
+            </form>
+          </section>
+
+          <section class="section card">
+            <div class="section-head"><div><h2>تنزيل وسائط سريع</h2><p>أداة سريعة من الصفحة الرئيسية للوصول المباشر إلى صفحة التحميل.</p></div></div>
+            <div class="comment-item">
+              <strong>المنصات المدعومة</strong>
+              <div class="small">TikTok · Instagram Reels / Posts</div>
+            </div>
+            <div class="comment-item">
+              <strong>الاستخدام</strong>
+              <div class="small">ألصق الرابط في صفحة التحميل وسيتم تجهيز زر تنزيل مباشر طالما أن الرابط عام ومدعوم.</div>
+            </div>
+            <div class="panel-actions"><a class="btn btn-secondary" href="/downloader">فتح صفحة التحميل</a><a id="channelLink" class="btn btn-ghost" href="#" target="_blank" rel="noreferrer">قناة الواتساب</a></div>
+          </section>
+        </section>
+
+        <section class="section card" id="comments">
+          <div class="section-head"><div><h2>تعليقات واستفسارات المستخدمين</h2><p>يمكن للمستخدم إرسال ملاحظته أو طلبه، ويظهر الرد لاحقاً في نفس الواجهة.</p></div></div>
+          <form id="commentForm">
+            <div class="two-col">
+              <div class="field"><span>الاسم</span><input id="commentName" required /></div>
+              <div class="field"><span>وسيلة التواصل</span><input id="commentContact" placeholder="اختياري" /></div>
+            </div>
+            <div class="field"><span>الرسالة</span><textarea id="commentMessage" required placeholder="اكتب ملاحظتك أو استفسارك هنا"></textarea></div>
+            <div class="form-actions"><button class="btn btn-primary" type="submit">إرسال التعليق</button></div>
+            <div id="commentStatus" class="status"></div>
+          </form>
+          <div id="commentsList" class="comment-list"></div>
+        </section>
+      </div>
+    </main>
+
+    <footer class="footer shell">تم تطوير الواجهة لتناسب مشروع Fares Bot الحالي باستخدام واجهة عربية داكنة متجاوبة ولوحة تحكم داخلية مرتبطة مباشرة بخادم Express.</footer>
+    <script src="/landing.js"></script>
+  </body>
+</html>

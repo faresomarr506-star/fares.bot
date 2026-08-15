@@ -99,6 +99,8 @@ class WaSession {
     this.closed = false
     this.pairingRequested = false
     this.pairingAttempts = 0
+    this.pendingPairingPromise = null
+    this.connectionState = 'idle'
     this.isNewPairing = false
     this.handledStatusIds = new Map()
     this.lastActivityAt = Date.now()
@@ -164,12 +166,8 @@ class WaSession {
       )
     })
 
-    if (!state?.creds?.registered && !this.pairingRequested) {
-      this.pairingRequested = true
+    if (!state?.creds?.registered) {
       db.setStatus(this.userId, this.number, 'pairing')
-      setTimeout(() => {
-        this.requestPairingCode().catch((e) => console.error(`[${this.number}] pairing`, e.message))
-      }, 1500)
     }
 
     return sock
@@ -188,10 +186,28 @@ class WaSession {
     throw new Error('pairing_timeout')
   }
 
+  async waitForPairingReady(timeoutMs = Math.max(12000, Number(config.PAIRING_TIMEOUT_MS || 20000))) {
+    const timeoutAt = Date.now() + timeoutMs
+    while (Date.now() < timeoutAt) {
+      if (this.closed) throw new Error('session_closed')
+      if (!this.sock) {
+        await sleep(250)
+        continue
+      }
+      if (this.connectionState === 'connecting' || this.connectionState === 'open') {
+        await sleep(1200)
+        return true
+      }
+      await sleep(250)
+    }
+    throw new Error('pairing_socket_timeout')
+  }
+
   async onConnectionUpdate(update) {
     const { connection, lastDisconnect } = update || {}
     const statusCode = lastDisconnect?.error?.output?.statusCode
     const registered = !!this.state?.creds?.registered
+    if (connection) this.connectionState = connection
 
     if (connection === 'connecting' && !registered) {
       db.setStatus(this.userId, this.number, 'pairing')
@@ -200,6 +216,7 @@ class WaSession {
     if (connection === 'open') {
       this.pairingAttempts = 0
       this.pairingRequested = false
+      this.pendingPairingPromise = null
       db.setStatus(this.userId, this.number, 'connected')
       db.clearPairingCode(this.number)
       db.bumpMetric('totalSuccessfulLinks', 1)
@@ -242,6 +259,8 @@ class WaSession {
     if (connection === 'close') {
       this.sock = null
       this.state = null
+      this.connectionState = 'close'
+      this.pendingPairingPromise = null
 
       if (statusCode === DisconnectReason.loggedOut) {
         db.setStatus(this.userId, this.number, 'logged_out')
@@ -272,39 +291,43 @@ class WaSession {
   }
 
   async requestPairingCode(force = false) {
-    if (!this.sock || this.closed) {
-      await this.start()
-    }
-    if (!this.sock || this.closed) throw new Error('session_unavailable')
-    if (this.state?.creds?.registered) throw new Error('already_registered')
-    if (this.pairingRequested && !force) {
-      const cached = db.getPairingCode(this.number)
-      if (cached) return cached
-    }
+    const cached = db.getPairingCode(this.number)
+    if (cached && !force) return cached
+    if (this.pendingPairingPromise) return this.pendingPairingPromise
+
+    this.pendingPairingPromise = (async () => {
+      if (!this.sock || this.closed) {
+        await this.start()
+      }
+      if (!this.sock || this.closed) throw new Error('session_unavailable')
+      if (this.state?.creds?.registered) throw new Error('already_registered')
+
+      let lastError = null
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          this.pairingRequested = true
+          await this.waitForPairingReady()
+          const rawCode = await this.sock.requestPairingCode(String(this.number).replace(/\D/g, ''))
+          const code = formatPairCode(rawCode)
+          this.isNewPairing = true
+          this.pairingAttempts = 0
+          return db.setPairingCode(this.number, rawCode, code, config.PAIRING_CODE_TTL_SECONDS)
+        } catch (e) {
+          lastError = e
+          this.pairingAttempts = attempt
+          this.pairingRequested = false
+          if (attempt < 3 && !this.closed) {
+            await sleep(2500)
+          }
+        }
+      }
+      throw lastError || new Error('pairing_failed')
+    })()
 
     try {
-      this.pairingRequested = true
-      const rawCode = await this.sock.requestPairingCode(String(this.number).replace(/\D/g, ''))
-      const code = formatPairCode(rawCode)
-      this.isNewPairing = true
-      const pairing = db.setPairingCode(this.number, rawCode, code, config.PAIRING_CODE_TTL_SECONDS)
-
-      await notify(
-        this.chatId,
-        `🔗 <b>كود الاقتران</b> للرقم <b>${this.number}</b>:\n\n` +
-          `<code>${code}</code>\n\n` +
-          `📲 افتح واتساب ← الأجهزة المرتبطة ← الاقتران برقم ← أدخل الكود الآن.\n` +
-          `⏳ الكود صالح لفترة قصيرة فقط.`
-      )
-      return pairing
-    } catch (e) {
-      this.pairingAttempts += 1
-      this.pairingRequested = false
-      if (this.pairingAttempts < 3 && !this.closed) {
-        await sleep(2500)
-        return this.requestPairingCode(true)
-      }
-      throw e
+      return await this.pendingPairingPromise
+    } finally {
+      this.pendingPairingPromise = null
     }
   }
 

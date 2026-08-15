@@ -3,31 +3,23 @@
 const { Telegraf } = require('telegraf');
 const config = require('../config');
 const logger = require('../utils/logger');
-const { findOrCreateUser, addPhone, removePhone, User } = require('../models/User');
+const { findOrCreateUser, addPhone, removePhone, setEmojis, User } = require('../models/User');
 const {
   normalizePhoneNumber,
   isValidPhoneNumber,
   phoneToJid,
 } = require('../utils/phone');
-const { parseEmojis, normalizeSlot } = require('../utils/emoji');
+const { parseEmojis } = require('../utils/emoji');
 const {
   spawnSocket,
   requestPairing,
+  bindPhoneEmojis,
   sessions,
 } = require('../whatsapp/socket');
 const { STATES, StateStore } = require('./state');
 const { mainMenu, backToMenu, phoneList } = require('./keyboards');
-const {
-  getConfig,
-  setSlot,
-  clearSlot,
-  MAX_SLOTS,
-} = require('../models/EmojiConfig');
-const { attachAutoReact } = require('./react');
 
 const state = new StateStore();
-
-const SLOT_LABELS = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
 
 function buildBot() {
   const bot = new Telegraf(config.botToken);
@@ -36,24 +28,15 @@ function buildBot() {
     logger.error({ err: err?.message, update: ctx.update?.update_id }, 'telegraf error');
   });
 
-  // Wire up the auto-react handler FIRST so every incoming message is
-  // observed. Because this is event-driven (no polling delay), the bot
-  // typically reacts within the first 100ms of a user posting.
-  attachAutoReact(bot);
-
   bot.start(async (ctx) => {
-    const tgId = ctx.from?.id;
-    await findOrCreateUser(ctx.chat?.id || tgId, ctx.from || {});
-    state.reset(ctx.chat?.id || tgId);
+    await findOrCreateUser(ctx.chat.id, ctx.from || {});
+    state.reset(ctx.chat.id);
     await ctx.replyWithMarkdownV2(
       [
-        '👋 *أهلاً بك في بوت التفاعل التلقائي على الحالات*',
+        '👋 *أهلاً بك في بوت ربط واتساب*',
         '',
-        'هذا البوت يفعّل التفاعل التلقائي على الحالات مع',
-        '*حتى 10 إيموجيات مختلفة* \\(كل خانة إيموجي واحد أو أكثر\\)\\.',
-        '',
-        'عند نشر حالتي، يتفاعل البوت فوراً بإيموجي عشوائي',
-        'من خاناتك المفعّلة، خلال أقل من ثانية\\.',
+        'هذا البوت يربط رقمك عبر *كود اقتران* من 8 أرقام،',
+        'ثم يفعّل خاصية *التفاعل التلقائي على الحالات* \\(Status\\)\\.',
         '',
         'اختر من القائمة التالية 👇',
       ].join('\n'),
@@ -70,13 +53,13 @@ function buildBot() {
     );
   });
 
-  bot.action('menu:add', async (ctx) => {
+  bot.action('menu:link', async (ctx) => {
     try { await ctx.answerCbQuery(); } catch (_) {}
     const chatId = ctx.chat?.id || ctx.from?.id;
     state.set(chatId, STATES.WAIT_NUMBER);
     await ctx.editMessageText(
       [
-        '➕ *إضافة رقم واتساب جديد*',
+        '📲 *ربط رقم واتساب جديد*',
         '',
         'أرسل رقم هاتفك الآن بالتنسيق التالي:',
         '› مفتاح الدولة ثم الرقم',
@@ -96,14 +79,15 @@ function buildBot() {
     const u = await findOrCreateUser(tgId, ctx.from || {});
     if (!u.phones.length) {
       return ctx.editMessageText(
-        '📭 *لا يوجد أرقام مربوطة بعد*\n\nاضغط على "➕ إضافة رقم جديد" للبدء.',
+        '📭 *لا يوجد أرقام مربوطة بعد*\n\nاضغط على "ربط رقم جديد" للبدء.',
         mainMenu()
       );
     }
     const lines = u.phones.map((p, i) => {
       const on = p.enabled ? '✅' : '⏸';
+      const emojiJoined = (p.emojis || []).join(' ');
       const lastSeen = p.lastSeen ? new Date(p.lastSeen).toLocaleString('en-GB') : '—';
-      return '*' + (i + 1) + '* \\| ' + on + ' \\`' + p.number + '\\`\n   آخر اتصال: ' + lastSeen;
+      return '*' + (i + 1) + '* \\| ' + on + ' \\`' + p.number + '\\`\n   إيموجي: ' + (emojiJoined || '—') + '\n   آخر اتصال: ' + lastSeen;
     });
     await ctx.editMessageText(
       ['📋 *أرقامك المربوطة:*', '', ...lines].join('\n'),
@@ -111,96 +95,51 @@ function buildBot() {
     );
   });
 
-  // --- 10-slot auto-react menu -------------------------------------------
   bot.action('menu:emoji', async (ctx) => {
     try { await ctx.answerCbQuery(); } catch (_) {}
     const tgId = ctx.chat?.id || ctx.from?.id;
-    const cfg = await getConfig(tgId);
-
-    const lines = cfg.slots.map((s, i) => {
-      const text = String(s?.text || '').trim() || '—';
-      return `${SLOT_LABELS[i]} : \`${escapeMd(text)}\``;
-    });
-
-    const filled = lines.filter((l) => !l.endsWith('`—`')).length;
+    const u = await findOrCreateUser(tgId, ctx.from || {});
+    if (!u.phones.length) {
+      return ctx.editMessageText(
+        '📭 *لا يوجد أرقام مربوطة*\nأضف رقماً أولاً من "ربط رقم جديد".',
+        mainMenu()
+      );
+    }
+    state.set(tgId, STATES.WAIT_EMOJI_INDEX);
     await ctx.editMessageText(
       [
-        '😀 *إيموجيات التفاعل التلقائي*',
+        '😀 *تغيير إيموجي التفاعل*',
         '',
-        `الخانات المفعّلة: *${filled}* / ${MAX_SLOTS}`,
+        'اختر الرقم الذي تريد تعديل إيموجي التفاعل له:',
         '',
-        'كل خانة تستقبل إيموجي واحد أو عدة إيموجي متلاصقة',
-        '\\(حتى الأعلام والإيموجي المركبة، بدون فواصل\\)\\.',
-        'عند نشر أي حالة، يختار البوت خانة عشوائياً ويرد',
-        'بالإيموجي داخلها خلال أقل من ثانية\\.',
-        '',
-        'الأخيار:',
-        ...lines,
+        '💡 يمكنك إرسال الإيموجي لاحقاً بدون فواصل،',
+        'حتى الأعلام مثل `🇾🇪` أو الإيموجي المركبة.',
       ].join('\n'),
-      slotKeyboard(cfg)
+      phoneList(u.phones, 'emoji:pick')
     );
   });
 
-  function slotKeyboard(cfg) {
-    const rows = [];
-    for (let i = 0; i < MAX_SLOTS; i++) {
-      const text = String(cfg.slots[i]?.text || '').trim();
-      const label = text ? `${SLOT_LABELS[i]} ${text}` : `${SLOT_LABELS[i]} \\(فارغة\\)`;
-      rows.push([
-        { text: label.replace(/\\/g, '').replace(/\(/g, '(').replace(/\)/g, ')'), callback_data: `slot:set:${i}` },
-        { text: '🧹', callback_data: `slot:clr:${i}` },
-      ]);
-    }
-    rows.push([{ text: '🔙 رجوع للقائمة', callback_data: 'menu:home' }]);
-    return { reply_markup: { inline_keyboard: rows } };
-  }
-
-  bot.action(/^slot:set:(\d+)$/, async (ctx) => {
+  bot.action(/^emoji:pick:(\d+)$/, async (ctx) => {
     try { await ctx.answerCbQuery(); } catch (_) {}
     const tgId = ctx.chat?.id || ctx.from?.id;
     const idx = Number(ctx.match[1]);
-    if (Number.isNaN(idx) || idx < 0 || idx >= MAX_SLOTS) {
-      return ctx.editMessageText('❌ خانة غير صالحة.', mainMenu());
+    const u = await User.findOne({ telegramId: tgId });
+    if (!u || !u.phones[idx]) {
+      return ctx.editMessageText('❌ خيار غير صالح.', mainMenu());
     }
-    state.set(tgId, STATES.WAIT_EMOJIS, { slotIdx: idx });
+    state.set(tgId, STATES.WAIT_EMOJIS, { number: u.phones[idx].number });
     await ctx.editMessageText(
       [
-        `${SLOT_LABELS[idx]} *خانة رقم* \\(\`${idx + 1}\`\\)`,
+        `😀 الرقم المحدد: \`${u.phones[idx].number}\``,
         '',
-        'أرسل الآن إيموجي واحد أو عدة إيموجي متلاصقة،',
-        '*بدون* فواصل \\(مسافات، فواصل، backticks\\)\\.',
+        'أرسل الإيموجي\\(ي\\) التي تريد استخدامها للتفاعل على حالات واتساب:',
+        '› إيموجي واحد أو عدة إيموجي',
+        '› يمكن إرسالها *بدون فواصل* \\(مسافة أو بدون\\) ',
+        '› الأعلام \\(مثل 🇾🇪\\) والإيموجي المركبة مدعومة',
         '',
-        'أمثلة مقبولة كما هي:',
-        '› `❤️`',
-        '› `❤️🔥`',
-        '› `💤🇾🇪`',
-        '› `🥹❤️🔥💤`',
+        'مثال: `❤️🔥🥹` أو `❤️ 🔥` أو `🇾🇪`',
       ].join('\n'),
       backToMenu()
-    );
-  });
-
-  bot.action(/^slot:clr:(\d+)$/, async (ctx) => {
-    try { await ctx.answerCbQuery(); } catch (_) {}
-    const tgId = ctx.chat?.id || ctx.from?.id;
-    const idx = Number(ctx.match[1]);
-    await clearSlot(tgId, idx);
-    // Re-render the slot panel
-    const cfg = await getConfig(tgId);
-    const lines = cfg.slots.map((s, i) => {
-      const text = String(s?.text || '').trim() || '—';
-      return `${SLOT_LABELS[i]} : \`${escapeMd(text)}\``;
-    });
-    const filled = lines.filter((l) => !l.endsWith('`—`')).length;
-    await ctx.editMessageText(
-      [
-        '😀 *إيموجيات التفاعل التلقائي*',
-        '',
-        `الخانات المفعّلة: *${filled}* / ${MAX_SLOTS}`,
-        '',
-        ...lines,
-      ].join('\n'),
-      slotKeyboard(cfg)
     );
   });
 
@@ -241,10 +180,8 @@ function buildBot() {
     try { await ctx.answerCbQuery(); } catch (_) {}
     const tgId = ctx.chat?.id || ctx.from?.id;
     const u = await User.findOne({ telegramId: tgId });
-    const cfg = await getConfig(tgId);
     const live = (u?.phones || []).filter((p) => sessions.has(p.number)).length;
     const total = (u?.phones || []).length;
-    const filled = cfg.slots.filter((s) => String(s?.text || '').trim()).length;
     await ctx.editMessageText(
       [
         '📊 *حالة البوت*',
@@ -252,7 +189,6 @@ function buildBot() {
         `المستخدم: \`${tgId}\``,
         `الأرقام المربوطة: *${total}*`,
         `المتصلة فعلياً: *${live}*`,
-        `خانات الإيموجي المفعّلة: *${filled}* / ${MAX_SLOTS}`,
         `وقت التشغيل: ${process.uptime().toFixed(0)} ثانية`,
       ].join('\n'),
       mainMenu()
@@ -262,43 +198,45 @@ function buildBot() {
   bot.on('text', async (ctx) => {
     const tgId = ctx.chat?.id || ctx.from?.id;
     const cur = state.get(tgId);
-    // IMPORTANT: do not parse ctx.message.text with parse_mode MarkdownV2 —
-    // the user's emoji is verbatim text. apply no escaping, no wrapping.
-    const text = ctx.message?.text || '';
+    const text = (ctx.message?.text || '').trim();
 
     if (cur.state === STATES.WAIT_NUMBER) {
       if (!isValidPhoneNumber(text)) {
-        await ctx.reply(
+        return ctx.replyWithMarkdownV2(
           [
-            '⚠️ الرقم غير صالح.',
+            '⚠️ *الرقم غير صالح*',
+            '',
             'تأكد من:',
-            '• إرسال أرقام فقط (بدون + أو مسافات)',
-            '• تضمين مفتاح الدولة',
-            'مثال: 9665XXXXXXXX',
-          ].join('\n')
+            '› إرسال أرقام فقط \\(بدون + أو مسافات\\)',
+            '› تضمين مفتاح الدولة',
+            '› مثال: `9665XXXXXXXX`',
+          ].join('\n'),
+          backToMenu()
         );
-        return;
       }
+
       const number = normalizePhoneNumber(text);
       const jid = phoneToJid(number);
 
       try {
         await addPhone(tgId, number, jid);
 
+        // One-shot success notification fired by socket.js the moment the
+        // socket reports `connection.update === 'open'` AND credentials are
+        // registered (i.e. the user finished entering the pairing code).
         const onConnected = async (pairedNumber) => {
           try {
-            // Plain text reply (no parse_mode) so the code displays cleanly
-            // and no Markdown escaping mangling happens.
-            await ctx.telegram.sendMessage(
+            await bot.telegram.sendMessage(
               tgId,
               [
-                '✅ تم الاتصال بنجاح برقمك',
+                `✅ *تم الاتصال بنجاح برقمك*`,
                 '',
-                `الرقم: ${pairedNumber}`,
+                `الرقم: \`${escapeMd(pairedNumber)}\``,
                 '',
-                '📡 يتم الآن التفاعل تلقائياً على حالات واتساب.',
-                'يمكنك تعديل إيموجي التفاعل من القائمة الرئيسية.',
-              ].join('\n')
+                '📡 يتم الآن التفاعل تلقائياً على حالات واتساب،',
+                'يمكنك تعديل الإيموجي من القائمة الرئيسية.',
+              ].join('\n'),
+              { parse_mode: 'MarkdownV2' }
             );
           } catch (e) {
             logger.warn({ err: e?.message, tgId }, 'success notification failed');
@@ -312,73 +250,90 @@ function buildBot() {
           onConnected,
         });
         const code = await requestPairing(number);
-        // Plain text code display — no Markdown wrapping, NO backticks around it.
-        await ctx.reply(
+        await bindPhoneEmojis(number, (await getEmojisFor(tgId, number)) || ['❤️', '🔥']);
+        const safeCode = code?.match?.(/^PAIR-[A-Z0-9]+$/) ? code.slice(5) : code;
+        await ctx.replyWithMarkdownV2(
           [
-            `✅ تم تجهيز الاتصال للرقم ${number}`,
+            `✅ تم تجهيز الاتصال للرقم \`${escapeMd(number)}\``,
             '',
-            '🔐 كود الاقتران:',
+            '🔐 *كود الاقتران:*',
             '────────────────────',
-            `${code}`,
+            `\`\`\`${safeCode}\`\`\``,
             '────────────────────',
             '',
             '📱 افتح واتساب على هاتفك:',
-            '1. الإعدادات  ➜  الأجهزة المرتبطة',
-            '2. ربط جهاز',
-            '3. ربط عبر رقم بدلاً من ذلك (إذا طُلب)',
-            '4. أدخل الكود أعلاه',
+            '1\\. الإعدادات  ➜  *الأجهزة المرتبطة*',
+            '2\\. *ربط جهاز*',
+            '3\\. *ربط عبر رقم بدلاً من ذلك* \\(إذا طُلب\\)',
+            '4\\. أدخل الكود أعلاه',
             '',
-            '⏳ بعد إتمام الربط ستصلك رسالة تأكيد تلقائية.',
+            '⏳ بعد إتمام الربط ستصلك رسالة تأكيد تلقائية\\.',
           ].join('\n'),
           mainMenu()
         );
         state.reset(tgId);
       } catch (e) {
         logger.error({ e: e?.message, number, tgId }, 'pairing failed');
-        await ctx.reply('❌ تعذّر إكمال الربط.\nالسبب: ' + (e?.message || 'unknown'));
+        await ctx.replyWithMarkdownV2(
+          [
+            '❌ *تعذّر إكمال الربط*',
+            '',
+            'السبب: `' + escapeMd(e?.message || 'unknown') + '`',
+            '',
+            'تحقق من الرقم وحاول مرة أخرى.',
+          ].join('\n'),
+          mainMenu()
+        );
         state.reset(tgId);
       }
       return;
     }
 
     if (cur.state === STATES.WAIT_EMOJIS) {
-      const idx = cur.payload.slotIdx;
-      // Drop any leftover backticks / code fences the user typed by accident
-      // so a message like ❤️ stays exactly ❤️ in the slot.
-      const normalized = normalizeSlot(text);
+      const number = cur.payload.number;
 
-      if (!normalized) {
-        return ctx.reply(
+      // Grapheme-cluster based parser: handles "❤️ 🔥", "❤️🔥",
+      // "🇾🇪" (single flag), and ZWJ family sequences — all without
+      // requiring the user to insert any separator.
+      const emojis = parseEmojis(text);
+
+      if (!emojis.length) {
+        return ctx.replyWithMarkdownV2(
           [
-            '⚠️ لم أتعرف على إيموجي صالح.',
+            '⚠️ *لم أتعرف على إيموجي صالح*',
             '',
-            'أرسل إيموجي واحد أو أكثر بدون فواصل ولا علامات تمييل',
-            'مثال: ❤️ أو ❤️🔥 أو 💤🇾🇪',
+            'أرسل إيموجي واحد أو أكثر، مثال:',
+            '› `❤️ 🔥` \\(مع أو بدون مسافات\\)',
+            '› `🇾🇪` \\(علم بدون فواصل\\)',
+            '› `❤️🔥🥹` \\(إيموجي متلاصقة\\)',
           ].join('\n'),
           backToMenu()
         );
       }
 
-      await setSlot(tgId, idx, normalized);
+      await setEmojis(tgId, number, emojis);
+      await bindPhoneEmojis(number, emojis);
       state.reset(tgId);
-      // Display the slot's evaluated string with NO wrap. MarkdownV2 would
-      // re-escape & break composed emoji sequences — keep it plain.
-      await ctx.reply(
+      return ctx.replyWithMarkdownV2(
         [
-          `${SLOT_LABELS[idx]} تم حفظ الإيموجي في الخانة ${idx + 1}:`,
+          `✅ تم تحديث إيموجي الرقم \`${escapeMd(number)}\``,
           '',
-          `${normalized}`,
+          'الإيموجي الحالية: ' + emojis.map((e) => `\`${e}\``).join(' '),
+          '',
+          'كل إيموجي يُختار عشوائياً لكل حالة \\(Status\\)\\.',
         ].join('\n'),
         mainMenu()
       );
-      return;
     }
   });
 
-  // parseEmojis helper retained for downstream tooling
-  void parseEmojis;
-
   return bot;
+}
+
+async function getEmojisFor(tgId, number) {
+  const u = await User.findOne({ telegramId: tgId });
+  const p = (u?.phones || []).find((x) => x.number === number);
+  return p?.emojis || ['❤️', '🔥'];
 }
 
 const MD_ESC_RE = /[_*\[\]()~`>#+\-=|{}.!\\]/g;

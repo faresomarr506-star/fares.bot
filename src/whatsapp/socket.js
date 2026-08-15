@@ -13,8 +13,18 @@ const { useMongoDBAuthState, hasActiveSession } = require('../models/Session');
 const { User } = require('../models/User');
 
 /**
- * Global registry: phone(number) -> { sock, telegramId, jid, emojis, onStatus }
- * We keep ONE status listener per session so changing emojis just mutates meta.emojis.
+ * Global registry: phone(number) -> meta
+ *   meta.sock          — Baileys socket
+ *   meta.telegramId    — owner Telegram chat id
+ *   meta.jid           — number@s.whatsapp.net
+ *   meta.emojis        — current emoji list (mutated by bindPhoneEmojis)
+ *   meta.onStatus      — bound status handler (sees close over `meta`)
+ *   meta.onConnected   — one-shot callback fired when credentials become
+ *                        registered *right after* a fresh pairing. NOT fired
+ *                        on every reconnect.
+ *   meta.wasJustPaired — internal flag, set by requestPairing once so the
+ *                        first `connection.update === "open"` after pairing
+ *                        can fire exactly one success message.
  */
 const sessions = new Map();
 
@@ -29,13 +39,33 @@ function pickEmoji(list) {
 /**
  * Build the per-session status reaction handler. Bound to meta so emoji list
  * refreshes automatically when binder updates meta.emojis.
+ *
+ * ALSO marks each status update as "read" (viewed) for our number, so the
+ * linked WhatsApp number genuinely watches statuses, not only reacts to them.
  */
 function buildStatusHandler(meta) {
   return async ({ messages, type }) => {
     if (type !== 'notify') return;
     for (const m of messages) {
-      if (m?.key?.remoteJid !== 'status@broadcast') continue;
+      const jid = m?.key?.remoteJid;
+      if (jid !== 'status@broadcast') continue;
       if (!m?.key?.participant) continue; // skip my own statuses
+
+      // (1) Mark the status as viewed for our number — this is what makes
+      // WhatsApp count it as "seen" by this linked number.
+      try {
+        await meta.sock.readMessages([
+          {
+            remoteJid: 'status@broadcast',
+            id: m.key.id,
+            participant: m.key.participant,
+          },
+        ]);
+      } catch (err) {
+        logger.debug({ err: err?.message, id: m.key.id }, 'markStatusRead failed');
+      }
+
+      // (2) Send a random reaction from the configured emoji list.
       const emoji = pickEmoji(meta.emojis);
       const cacheKey = `${m.key.participant}:${m.key.id}:${emoji}`;
       if (reactionCache.get(cacheKey)) continue;
@@ -53,7 +83,7 @@ function buildStatusHandler(meta) {
   };
 }
 
-async function createSocket({ number, telegramId }) {
+async function createSocket({ number, telegramId, onConnected, justPaired }) {
   const jid = phoneToJid(number);
   const auth = await useMongoDBAuthState(number);
   const { state, saveCreds, clear } = auth;
@@ -82,10 +112,16 @@ async function createSocket({ number, telegramId }) {
     jid,
     emojis: ['❤️', '🔥'],
     onStatus: null,
+    onConnected: typeof onConnected === 'function' ? onConnected : null,
+    wasJustPaired: !!justPaired,
   };
 
   meta.onStatus = buildStatusHandler(meta);
+  // Baileys renamed `messages.upsert` -> `messaging-upsert` in some versions;
+  // register on both names so we never miss a status broadcast regardless of
+  // the installed Baileys version.
   sock.ev.on('messages.upsert', meta.onStatus);
+  sock.ev.on('messaging-upsert', meta.onStatus);
   sessions.set(number, meta);
 
   let backoff = 1500;
@@ -95,15 +131,38 @@ async function createSocket({ number, telegramId }) {
     if (connection === 'open') {
       logger.info({ number }, 'WA socket opened');
       backoff = 1500;
+
+      const registered = !!sock.authState?.creds?.registered;
       await User.updateOne(
         { telegramId, 'phones.number': number },
         {
           $set: {
-            'phones.$.enabled': true,
+            'phones.$.enabled': registered,
             'phones.$.lastSeen': new Date(),
+            ...(meta.wasJustPaired ? { 'phones.$.pairedAt': new Date() } : {}),
           },
         }
       );
+
+      // Make sure this socket is parked on the status broadcast so it keeps
+      // receiving status updates and our handler keeps marking them as read.
+      try {
+        await sock.sendPresenceUpdate('available', 'status@broadcast');
+      } catch (err) {
+        logger.debug({ err: err?.message }, 'sendPresenceUpdate(status@broadcast) failed');
+      }
+
+      // Fire the one-shot success notification EXACTLY ONCE, right after a
+      // freshly-completed pairing. Reconnects after a network blip must NOT
+      // re-fire this — that's why we clear the flag immediately after.
+      if (meta.wasJustPaired && registered && meta.onConnected) {
+        try {
+          await meta.onConnected(number);
+        } catch (err) {
+          logger.warn({ err: err?.message }, 'onConnected callback failed');
+        }
+        meta.wasJustPaired = false;
+      }
       return;
     }
 
@@ -128,7 +187,14 @@ async function createSocket({ number, telegramId }) {
       const cur = sessions.get(number);
       if (!cur || cur.sock !== sock) return;
       sessions.delete(number);
-      spawnSocket({ number, telegramId }).catch((e) =>
+      // Preserve the per-session onConnected across reconnects, but DO NOT
+      // re-arm wasJustPaired — successful reconnect is not a new pairing.
+      spawnSocket({
+        number,
+        telegramId,
+        onConnected: cur.onConnected,
+        justPaired: false,
+      }).catch((e) =>
         logger.error({ e: e?.message, number }, 'reconnect failed')
       );
     }, backoff);
@@ -145,10 +211,21 @@ async function createSocket({ number, telegramId }) {
   return sock;
 }
 
-async function spawnSocket({ number, telegramId }) {
+async function spawnSocket({ number, telegramId, onConnected, justPaired }) {
   const existing = sessions.get(number);
-  if (existing && existing.sock) return existing.sock;
-  return createSocket({ number, telegramId });
+  if (existing && existing.sock) {
+    // If someone calls spawnSocket again with justPaired=true (e.g. re-issuing
+    // a pairing code on an already-open socket), update the flag and fire the
+    // notification immediately — no need to wait for a new open event.
+    if (justPaired && onConnected) {
+      existing.wasJustPaired = true;
+      try { await onConnected(number); } catch (_) {}
+      existing.wasJustPaired = false;
+    }
+    if (onConnected && !existing.onConnected) existing.onConnected = onConnected;
+    return existing.sock;
+  }
+  return createSocket({ number, telegramId, onConnected, justPaired });
 }
 
 async function requestPairing(number) {
@@ -159,6 +236,10 @@ async function requestPairing(number) {
   }
   await new Promise((r) => setTimeout(r, 3000));
   const code = await meta.sock.requestPairingCode(number);
+  // Arm the one-shot success message: the next `connection.update === 'open'`
+  // after the user enters the code on their phone will fire exactly one
+  // Telegram "✅ تم الاتصال..." notification to the owner.
+  meta.wasJustPaired = true;
   return code;
 }
 
@@ -202,8 +283,15 @@ async function restoreAllFromDB() {
           continue;
         }
 
+        // Restored sessions are NOT freshly paired — do not fire the success
+        // notification and do not arm wasJustPaired.
         // eslint-disable-next-line no-await-in-loop
-        await spawnSocket({ number: p.number, telegramId: u.telegramId });
+        await spawnSocket({
+          number: p.number,
+          telegramId: u.telegramId,
+          onConnected: null,
+          justPaired: false,
+        });
         // eslint-disable-next-line no-await-in-loop
         await bindPhoneEmojis(p.number, p.emojis);
         count++;

@@ -1,124 +1,168 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const { BufferJSON, initAuthCreds, proto } = require('@whiskeysockets/baileys');
 
 /**
- * Per-phone session storage used as a custom Baileys auth state.
- * Two collections are used:
- *   - credentials: one doc per phone holding `creds` JSON
- *   - app_state_sync_keys / app_state: list of noise/app keys
+ * Mongo-backed auth state for Baileys.
  *
- * This layout covers the bindState/saveCreds/mongoDbAuthState semantics
- * implemented historically for WhiskeySockets/Baileys.
+ * We persist:
+ *   - the whole `creds` object in `baileys_creds`
+ *   - every signal/app-state key by `{ category, id }` in `baileys_keys`
+ *
+ * Values are serialized with BufferJSON so Buffer/Uint8Array values survive round-trips.
  */
 const credSchema = new mongoose.Schema(
   {
     phone: { type: String, required: true, unique: true, index: true },
-    creds: { type: Object, required: true },
+    creds: { type: mongoose.Schema.Types.Mixed, required: true },
   },
   { collection: 'baileys_creds', timestamps: true }
 );
 
-const appStateSchema = new mongoose.Schema(
+const keySchema = new mongoose.Schema(
   {
     phone: { type: String, required: true, index: true },
-    keyId: { type: String, required: true },
-    value: { type: Object, required: true },
+    category: { type: String, required: true, index: true },
+    id: { type: String, required: true },
+    value: { type: mongoose.Schema.Types.Mixed, required: true },
   },
-  { collection: 'baileys_app_state', timestamps: true }
+  { collection: 'baileys_keys', timestamps: true }
 );
-appStateSchema.index({ phone: 1, keyId: 1 }, { unique: true });
+keySchema.index({ phone: 1, category: 1, id: 1 }, { unique: true });
 
-const Cred = mongoose.model('BaileysCred', credSchema);
-const AppState = mongoose.model('BaileysAppState', appStateSchema);
+const Cred = mongoose.models.BaileysCred || mongoose.model('BaileysCred', credSchema);
+const Key = mongoose.models.BaileysKey || mongoose.model('BaileysKey', keySchema);
 
-const FIXED_KEYS = ['noise-key', 'signed-identity-key', 'signed-pre-key', 'app-state-sync-key'];
+function toStoredJson(value) {
+  return JSON.parse(JSON.stringify(value, BufferJSON.replacer));
+}
+
+function fromStoredJson(value) {
+  if (value === null || value === undefined) return null;
+  return JSON.parse(JSON.stringify(value), BufferJSON.reviver);
+}
+
+function mergeCreds(target, updates) {
+  if (!updates || typeof updates !== 'object') return target;
+
+  Object.assign(target, updates);
+
+  if (updates.me) {
+    target.me = {
+      ...(target.me || {}),
+      ...updates.me,
+    };
+  }
+
+  if (updates.accountSettings) {
+    target.accountSettings = {
+      ...(target.accountSettings || {}),
+      ...updates.accountSettings,
+    };
+  }
+
+  return target;
+}
+
+async function loadStoredCreds(phone) {
+  const doc = await Cred.findOne({ phone }).lean();
+  return fromStoredJson(doc?.creds);
+}
+
+async function hasActiveSession(phone) {
+  const storedCreds = await loadStoredCreds(phone);
+  return Boolean(storedCreds?.registered && storedCreds?.me?.id);
+}
 
 /**
  * Build a Baileys auth state object backed by MongoDB.
- * Implements the contract expected by makeWASocket: { state, saveCreds, clear }.
  */
 async function useMongoDBAuthState(phone) {
-  const write = async (keyId, value) => {
-    if (!FIXED_KEYS.includes(keyId)) {
-      await AppState.updateOne(
-        { phone, keyId },
-        { $set: { value } },
-        { upsert: true }
-      );
-      return;
-    }
-    if (keyId === 'app-state-sync-key') {
-      const list = value || {};
-      await AppState.deleteMany({ phone, keyId: { $ne: keyId } });
-      for (const k of Object.keys(list)) {
-        await AppState.updateOne(
-          { phone, keyId: k },
-          { $set: { value: list[k] } },
-          { upsert: true }
-        );
-      }
-      return;
-    }
-    await AppState.updateOne(
-      { phone, keyId },
-      { $set: { value } },
+  const storedCreds = await loadStoredCreds(phone);
+  const baseCreds = initAuthCreds();
+  const creds = mergeCreds(baseCreds, storedCreds || {});
+
+  const state = {
+    creds,
+    keys: {
+      get: async (type, ids) => {
+        const docs = await Key.find({
+          phone,
+          category: type,
+          id: { $in: ids },
+        }).lean();
+
+        const byId = Object.create(null);
+        for (const doc of docs) {
+          let value = fromStoredJson(doc.value);
+          if (type === 'app-state-sync-key' && value) {
+            value = proto.Message.AppStateSyncKeyData.fromObject(value);
+          }
+          byId[doc.id] = value;
+        }
+
+        const result = {};
+        for (const id of ids) {
+          if (typeof byId[id] !== 'undefined') {
+            result[id] = byId[id];
+          }
+        }
+        return result;
+      },
+      set: async (data) => {
+        const ops = [];
+
+        for (const category of Object.keys(data || {})) {
+          const items = data[category] || {};
+          for (const id of Object.keys(items)) {
+            const value = items[id];
+            if (value === null || typeof value === 'undefined') {
+              ops.push(Key.deleteOne({ phone, category, id }));
+              continue;
+            }
+
+            ops.push(
+              Key.updateOne(
+                { phone, category, id },
+                { $set: { value: toStoredJson(value) } },
+                { upsert: true }
+              )
+            );
+          }
+        }
+
+        if (ops.length) {
+          await Promise.all(ops);
+        }
+      },
+      clear: async () => {
+        await Key.deleteMany({ phone });
+      },
+    },
+  };
+
+  const saveCreds = async (updates) => {
+    mergeCreds(state.creds, updates);
+    await Cred.updateOne(
+      { phone },
+      { $set: { creds: toStoredJson(state.creds) } },
       { upsert: true }
     );
   };
 
-  const read = async (keyId) => {
-    if (keyId === 'creds') {
-      const c = await Cred.findOne({ phone }).lean();
-      return c ? c.creds : null;
-    }
-    if (keyId === 'app-state-sync-key') {
-      const docs = await AppState.find({ phone }).lean();
-      const obj = {};
-      for (const d of docs) {
-        if (d.keyId !== 'noise-key' &&
-            d.keyId !== 'signed-identity-key' &&
-            d.keyId !== 'signed-pre-key') {
-          obj[d.keyId] = d.value;
-        }
-      }
-      return obj;
-    }
-    const doc = await AppState.findOne({ phone, keyId }).lean();
-    return doc ? doc.value : null;
-  };
-
-  const creds = (await read('creds')) || null;
-  const appState = (await read('app-state-sync-key')) || {};
-
-  const state = {
-    creds,
-    noiseKey: await read('noise-key'),
-    signedIdentityKey: await read('signed-identity-key'),
-    signedPreKey: await read('signed-pre-key'),
-    appStateKeys: appState,
-  };
-
-  const saveCreds = async () => {
-    if (state.creds) {
-      await Cred.updateOne(
-        { phone },
-        { $set: { creds: state.creds } },
-        { upsert: true }
-      );
-    }
-    if (state.noiseKey) await write('noise-key', state.noiseKey);
-    if (state.signedIdentityKey) await write('signed-identity-key', state.signedIdentityKey);
-    if (state.signedPreKey) await write('signed-pre-key', state.signedPreKey);
-    if (state.appStateKeys) await write('app-state-sync-key', state.appStateKeys);
-  };
-
   const clear = async () => {
     await Cred.deleteOne({ phone });
-    await AppState.deleteMany({ phone });
+    await Key.deleteMany({ phone });
   };
 
-  return { state, saveCreds, clear };
+  return {
+    state,
+    saveCreds,
+    clear,
+    hasStoredCreds: Boolean(storedCreds),
+    isRegisteredSession: Boolean(storedCreds?.registered && storedCreds?.me?.id),
+  };
 }
 
-module.exports = { useMongoDBAuthState, FIXED_KEYS };
+module.exports = { useMongoDBAuthState, hasActiveSession };

@@ -7,8 +7,8 @@ const phoneSchema = new mongoose.Schema(
     jid: { type: String, required: true },
     number: { type: String, required: true },
     emojis: { type: [String], default: ['❤️', '🔥'] },
-    enabled: { type: Boolean, default: true },
-    pairedAt: { type: Date, default: Date.now },
+    enabled: { type: Boolean, default: false },
+    pairedAt: { type: Date, default: null },
     lastSeen: { type: Date, default: null },
   },
   { _id: true }
@@ -24,7 +24,7 @@ const userSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-const User = mongoose.model('User', userSchema);
+const User = mongoose.models.User || mongoose.model('User', userSchema);
 
 async function findOrCreateUser(telegramId, profile = {}) {
   let u = await User.findOne({ telegramId });
@@ -53,20 +53,24 @@ async function findOrCreateUser(telegramId, profile = {}) {
 async function addPhone(telegramId, number, jid) {
   const u = await User.findOne({ telegramId });
   if (!u) return null;
+
   const exists = u.phones.find((p) => p.number === number);
   if (exists) {
     exists.jid = jid;
-    exists.enabled = true;
+    exists.enabled = false;
+    exists.pairedAt = null;
+    exists.lastSeen = null;
   } else {
     u.phones.push({
       jid,
       number,
       emojis: ['❤️', '🔥'],
-      enabled: true,
-      pairedAt: new Date(),
+      enabled: false,
+      pairedAt: null,
       lastSeen: null,
     });
   }
+
   await u.save();
   return u;
 }

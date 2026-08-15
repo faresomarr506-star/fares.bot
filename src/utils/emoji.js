@@ -3,21 +3,13 @@
 /**
  * Split any string into Unicode grapheme clusters so multi-codepoint
  * emoji (flags like 🇾🇪, ZWJ family sequences, skin tones, etc.)
- * stay intact even when the user sends them without spaces or newlines.
- *
- * Examples:
- *   "🇾🇪"          -> ["🇾🇪"]
- *   "❤️ 🔥"       -> ["❤️", " ", "🔥"]
- *   "❤️🔥"        -> ["❤️", "🔥"]   (no space, but still two emojis)
- *   "🇾🇪❤️🔥" -> ["🇾🇪", "❤️", "🔥"]
- *   "👨‍👩‍👧"   -> ["👨‍👩‍👧"]   (one family cluster)
+ * stay intact even when the user sends them without separators.
  */
 function graphemeClusters(input) {
   if (input === undefined || input === null) return [];
   const str = String(input);
   if (!str) return [];
 
-  // Preferred: Intl.Segmenter with grapheme granularity (Node 16+).
   try {
     if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
       const seg = new Intl.Segmenter('en', { granularity: 'grapheme' });
@@ -28,46 +20,67 @@ function graphemeClusters(input) {
       return out;
     }
   } catch (_) {
-    // fall through to Array.from
+    // fall through
   }
-
-  // Fallback: Array.from (correct surrogate pairs; ZWJ may over-split on
-  // very old runtimes, but Node >=18 used by this project supports Segmenter).
   return Array.from(str);
 }
 
-/**
- * Decide whether a single grapheme cluster is emoji-shaped.
- * Accepts flags, ZWJ family, single emoji, and emoji with modifiers.
- * Rejects clusters that mix emoji with letters or digits.
- */
 function isEmojiCluster(cluster) {
   if (!cluster || typeof cluster !== 'string') return false;
-  if (cluster.length > 32) return false; // realistic emoji clusters are short
-
-  // Must contain at least one Extended_Pictographic code point
+  if (cluster.length > 64) return false;
   if (!/\p{Extended_Pictographic}/u.test(cluster)) return false;
-
-  // Reject clusters that also contain a letter or digit (text + emoji mix)
-  if (/[\p{L}\p{N}]/u.test(cluster)) return false;
-
+  if (/[\p{L}\p{N}_~`]/u.test(cluster)) return false;
   return true;
 }
 
 /**
- * Parse a free-form user message into a clean list of emoji.
- * Works whether the user sends emojis separated by spaces, newlines,
- * commas, or with no separator at all (e.g. "❤️🔥" or "🇾🇪").
+ * Strip a user's accidental Markdown wrapper characters (backticks,
+ * code fences) so the raw emoji content survives intact into the slot.
+ */
+function stripWrappers(input) {
+  return String(input || '')
+    .replace(/```+/g, '')
+    .replace(/`/g, '')
+    .replace(/\\`/g, '')
+    .trim();
+}
+
+/**
+ * Parse a free-form message into emoji clusters, dropping non-emoji pieces.
  */
 function parseEmojis(input) {
-  const clusters = graphemeClusters(input);
-  const emojis = [];
+  const cleaned = stripWrappers(input);
+  const clusters = graphemeClusters(cleaned);
+  const out = [];
   for (const c of clusters) {
     const trimmed = c.trim();
     if (!trimmed) continue;
-    if (isEmojiCluster(trimmed)) emojis.push(trimmed);
+    if (isEmojiCluster(trimmed)) out.push(trimmed);
   }
-  return emojis;
+  return out;
 }
 
-module.exports = { graphemeClusters, isEmojiCluster, parseEmojis };
+/**
+ * Build ONE "slot" string by gluing emoji clusters back together with NO
+ * separator. This is the entry format for the 10-slot system: the slot
+ * content can be a single emoji ("❤️") OR a glued multi-emoji combo
+ * ("💤🇾🇪", "🥹❤️🔥") — the user sends it "as is", with no separators.
+ *
+ * Returns '' if the input contains no usable emoji cluster.
+ */
+function normalizeSlot(input) {
+  const cleaned = stripWrappers(input);
+  if (!cleaned) return '';
+  const clusters = parseEmojis(cleaned);
+  if (!clusters.length) return '';
+  // Glue back together — NO separator, exactly as the user sent it.
+  return clusters.join('');
+}
+
+module.exports = {
+  graphemeClusters,
+  isEmojiCluster,
+  parseEmojis,
+  normalizeSlot,
+  stripWrappers,
+};

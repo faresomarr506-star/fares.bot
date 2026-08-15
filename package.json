@@ -1,25 +1,22 @@
 {
-  "name": "wa-telegram-bot",
+  "name": "telegram-whatsapp-status-reacter",
   "version": "1.0.0",
-  "description": "Telegram bot that pairs WhatsApp numbers via 8-digit pairing code and reacts to statuses",
-  "main": "src/index.js",
+  "description": "بوت تيليجرام لربط أرقام واتساب برمز الاقتران والتفاعل التلقائي مع الحالات (ستوريات) بشكل مستمر - جلسات مستقلة لكل رقم",
+  "main": "index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
-  },
-  "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.18",
-    "dotenv": "^16.4.5",
-    "mongoose": "^8.7.0",
-    "node-cache": "^5.1.2",
-    "pino": "^9.4.0",
-    "pino-pretty": "^11.2.2",
-    "qrcode-terminal": "^0.12.0",
-    "telegraf": "^4.16.3"
+    "start": "node index.js"
   },
   "engines": {
-    "node": ">=18.17.0"
+    "node": ">=20.0.0"
   },
-  "author": "",
-  "license": "MIT"
+  "dependencies": {
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
+    "dotenv": "^16.4.5",
+    "emoji-regex": "^10.3.0",
+    "express": "^5.2.1",
+    "mongodb": "^7.5.0",
+    "node-telegram-bot-api": "^0.66.0",
+    "pino": "^9.4.0",
+    "yt-dlp-wrap": "^2.3.12"
+  }
 }
